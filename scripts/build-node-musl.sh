@@ -3,7 +3,7 @@
 # 环境变量: NODE_VER (目标版本号), /output (输出目录)
 set -e
 
-apk add --no-cache nodejs npm xz
+apk add --no-cache nodejs npm xz icu-data-full
 
 ACTUAL_VER=$(node --version | sed 's/^v//')
 echo "Alpine Node.js version: v${ACTUAL_VER} (requested: v${NODE_VER})"
@@ -35,12 +35,24 @@ if [ -f /lib/ld-musl-aarch64.so.1 ]; then
 fi
 echo "Libraries collected: $(ls "$LIB_DIR"/*.so* 2>/dev/null | wc -l) files"
 
-# 创建 node wrapper 脚本 (设置 LD_LIBRARY_PATH 后执行真正的 node)
+# 复制 ICU 完整数据 (npm 的 Intl.Collator 需要)
+echo "=== Copying ICU data ==="
+ICU_DAT=$(find /usr/share/icu -name "icudt*.dat" 2>/dev/null | head -1)
+if [ -n "$ICU_DAT" ] && [ -f "$ICU_DAT" ]; then
+  mkdir -p "${PKG_DIR}/share/icu"
+  cp "$ICU_DAT" "${PKG_DIR}/share/icu/"
+  echo "  + $(basename "$ICU_DAT") ($(du -h "$ICU_DAT" | cut -f1))"
+else
+  echo "  WARNING: ICU data file not found"
+fi
+
+# 创建 node wrapper 脚本 (使用打包的 musl 链接器，避免系统 musl 版本不兼容)
 cat > "${PKG_DIR}/bin/node" << 'NODEWRAPPER'
 #!/bin/sh
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-export LD_LIBRARY_PATH="${SELF_DIR}/../lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "${SELF_DIR}/node.bin" "$@"
+LIB_DIR="${SELF_DIR}/../lib"
+export NODE_ICU_DATA="${SELF_DIR}/../share/icu"
+exec "${LIB_DIR}/ld-musl-aarch64.so.1" --library-path "${LIB_DIR}" "${SELF_DIR}/node.bin" "$@"
 NODEWRAPPER
 chmod +x "${PKG_DIR}/bin/node"
 
@@ -53,15 +65,17 @@ fi
 cat > "${PKG_DIR}/bin/npm" << 'NPMWRAPPER'
 #!/bin/sh
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-export LD_LIBRARY_PATH="${SELF_DIR}/../lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "${SELF_DIR}/node.bin" "${SELF_DIR}/../lib/node_modules/npm/bin/npm-cli.js" "$@"
+LIB_DIR="${SELF_DIR}/../lib"
+export NODE_ICU_DATA="${SELF_DIR}/../share/icu"
+exec "${LIB_DIR}/ld-musl-aarch64.so.1" --library-path "${LIB_DIR}" "${SELF_DIR}/node.bin" "${LIB_DIR}/node_modules/npm/bin/npm-cli.js" "$@"
 NPMWRAPPER
 # 创建 npx wrapper
 cat > "${PKG_DIR}/bin/npx" << 'NPXWRAPPER'
 #!/bin/sh
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-export LD_LIBRARY_PATH="${SELF_DIR}/../lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "${SELF_DIR}/node.bin" "${SELF_DIR}/../lib/node_modules/npm/bin/npx-cli.js" "$@"
+LIB_DIR="${SELF_DIR}/../lib"
+export NODE_ICU_DATA="${SELF_DIR}/../share/icu"
+exec "${LIB_DIR}/ld-musl-aarch64.so.1" --library-path "${LIB_DIR}" "${SELF_DIR}/node.bin" "${LIB_DIR}/node_modules/npm/bin/npx-cli.js" "$@"
 NPXWRAPPER
 chmod +x "${PKG_DIR}/bin/npm" "${PKG_DIR}/bin/npx"
 
