@@ -104,6 +104,8 @@ class PtySession {
     this.rows = 24;
     this.buffer = Buffer.alloc(0);
     this.alive = true;
+    this._spawnFailCount = 0;
+    this._MAX_SPAWN_RETRIES = 5;
     activeSessions++;
     console.log(`[oc-config] Session created (active: ${activeSessions}/${MAX_SESSIONS})`);
     this._setupWSReader();
@@ -153,14 +155,36 @@ class PtySession {
       OPENCLAW_CONFIG_PATH: `${OC_DATA}/.openclaw/openclaw.json`,
       PATH: `${NODE_BASE}/bin:${OC_GLOBAL}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
     };
-    this.proc = spawn('script', ['-qc', `stty rows ${this.rows} cols ${this.cols} 2>/dev/null; printf '\\e[?2004l'; sh "${SCRIPT_PATH}"`, '/dev/null'],
-      { stdio: ['pipe', 'pipe', 'pipe'], env, detached: true });
+    // 检测 script 命令是否可用 (OpenWrt 默认不包含 util-linux-script)
+    // 如不可用则回退到直接用 sh 执行，牺牲 PTY 但保证功能可用
+    const hasScript = (() => {
+      try {
+        const { execFileSync } = require('child_process');
+        execFileSync('which', ['script'], { stdio: 'pipe', timeout: 2000 });
+        return true;
+      } catch { return false; }
+    })();
+    if (hasScript) {
+      this.proc = spawn('script', ['-qc', `stty rows ${this.rows} cols ${this.cols} 2>/dev/null; printf '\\e[?2004l'; sh "${SCRIPT_PATH}"`, '/dev/null'],
+        { stdio: ['pipe', 'pipe', 'pipe'], env, detached: true });
+    } else {
+      console.log('[oc-config] "script" command not found, falling back to sh (install util-linux-script for full PTY support)');
+      this.proc = spawn('sh', [SCRIPT_PATH],
+        { stdio: ['pipe', 'pipe', 'pipe'], env, detached: true });
+    }
 
-    this.proc.stdout.on('data', (d) => { if (this.alive) this.socket.write(encodeWSFrame(d, 0x01)); });
-    this.proc.stderr.on('data', (d) => { if (this.alive) this.socket.write(encodeWSFrame(d, 0x01)); });
+    this.proc.stdout.on('data', (d) => { if (this.alive) { this._spawnFailCount = 0; this.socket.write(encodeWSFrame(d, 0x01)); } });
+    this.proc.stderr.on('data', (d) => { if (this.alive) { this._spawnFailCount = 0; this.socket.write(encodeWSFrame(d, 0x01)); } });
     this.proc.on('close', (code) => {
       if (!this.alive) return;
-      console.log(`[oc-config] Script exited with code ${code}, auto-restarting...`);
+      this._spawnFailCount++;
+      if (this._spawnFailCount > this._MAX_SPAWN_RETRIES) {
+        console.log(`[oc-config] Script failed ${this._spawnFailCount} times, stopping retries`);
+        this.socket.write(encodeWSFrame(`\r\n\x1b[31m配置脚本连续启动失败 ${this._spawnFailCount} 次，已停止重试。\r\n请检查是否已安装 util-linux-script 包: opkg install coreutils-script\x1b[0m\r\n`, 0x01));
+        this.proc = null;
+        return;
+      }
+      console.log(`[oc-config] Script exited with code ${code}, auto-restarting (attempt ${this._spawnFailCount}/${this._MAX_SPAWN_RETRIES})...`);
       this.socket.write(encodeWSFrame(`\r\n\x1b[33m配置脚本已退出 (code: ${code})，正在自动重启...\x1b[0m\r\n`, 0x01));
       this.proc = null;
       // 自动重启脚本，保持 WebSocket 连接
@@ -171,6 +195,7 @@ class PtySession {
       }, 1500);
     });
     this.proc.on('error', (err) => {
+      this._spawnFailCount++;
       if (this.alive) this.socket.write(encodeWSFrame(`\r\n\x1b[31m启动失败: ${err.message}\x1b[0m\r\n`, 0x01));
     });
   }

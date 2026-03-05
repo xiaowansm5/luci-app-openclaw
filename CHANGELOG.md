@@ -4,6 +4,17 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.5] - 2026-03-05
+
+### 修复配置管理页面 "spawn script ENOENT" 启动失败 (#3, #4)
+
+#### 修复
+- **Web PTY 启动失败**: `web-pty.js` 硬编码依赖 `script` 命令 (来自 `util-linux-script`)，但部分 OpenWrt 固件默认不包含该命令，导致 `spawn script ENOENT` 错误并无限循环重启
+  - 新增 `script` 命令自动检测，不存在时回退到 `sh` 直接执行 `oc-config.sh`
+  - 新增连续失败计数器 (最多 5 次)，防止启动失败时的无限重试循环
+  - 失败时向用户终端显示明确的错误提示和修复命令
+- **Makefile 依赖补全**: `LUCI_DEPENDS` 新增 `+util-linux-script`，确保新安装自动拉取 `script` 命令
+
 ## [1.0.4] - 2026-03-05
 
 ### 适配 OpenClaw 2026.3.2
