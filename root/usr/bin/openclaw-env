@@ -487,6 +487,72 @@ do_upgrade() {
 	fi
 }
 
+# ── 恢复出厂设置 (非交互式) ──
+do_factory_reset() {
+	local config_dir="${OC_DATA}/.openclaw"
+	local config_file="${config_dir}/openclaw.json"
+	local auth_file="${config_dir}/agents/main/agent/auth-profiles.json"
+
+	log_info "恢复出厂设置..."
+
+	# 1. 停止 Gateway
+	log_info "停止 Gateway..."
+	/etc/init.d/openclaw stop >/dev/null 2>&1 || true
+	sleep 2
+
+	# 2. 备份当前配置
+	if [ -f "$config_file" ]; then
+		local backup_dir="${config_dir}/backups"
+		local backup_ts=$(date +%Y%m%d_%H%M%S)
+		mkdir -p "$backup_dir"
+		cp "$config_file" "${backup_dir}/openclaw_${backup_ts}.json"
+		log_info "备份已保存: backups/openclaw_${backup_ts}.json"
+	fi
+
+	# 3. 重置配置
+	rm -f "$config_file" "${config_file}.bak" 2>/dev/null || true
+	echo '{}' > "$config_file"
+	chown openclaw:openclaw "$config_file" 2>/dev/null || true
+
+	# 4. 重置认证信息
+	if [ -f "$auth_file" ]; then
+		echo '{"version":1,"profiles":{},"usageStats":{}}' > "$auth_file"
+		chown openclaw:openclaw "$auth_file" 2>/dev/null || true
+	fi
+
+	# 5. 重新初始化
+	if [ -x "$NODE_BIN" ]; then
+		local oc_entry
+		oc_entry=$(find "$OC_GLOBAL" -name "openclaw.mjs" -path "*/openclaw/openclaw.mjs" 2>/dev/null | head -1)
+		if [ -n "$oc_entry" ]; then
+			log_info "重新初始化..."
+			OPENCLAW_HOME="$OC_DATA" "$NODE_BIN" "$oc_entry" onboard --non-interactive --accept-risk >/dev/null 2>&1 || true
+		fi
+	fi
+
+	# 6. 应用 OpenWrt 适配配置
+	if [ -x "$NODE_BIN" ] && [ -f "$config_file" ]; then
+		local new_token
+		new_token=$(head -c 24 /dev/urandom | hexdump -e '24/1 "%02x"' 2>/dev/null || dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 48)
+		_JS_KEY="gateway.port" _JS_VAL="18789" "$NODE_BIN" -e "const fs=require('fs');let d={};try{d=JSON.parse(fs.readFileSync('${config_file}','utf8'));}catch(e){}const ks=process.env._JS_KEY.split('.');let o=d;for(let i=0;i<ks.length-1;i++){if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};o=o[ks[i]];}let v=process.env._JS_VAL;try{v=JSON.parse(v);}catch(e){}o[ks[ks.length-1]]=v;fs.writeFileSync('${config_file}',JSON.stringify(d,null,2));" 2>/dev/null
+		for kv in "gateway.bind=lan" "gateway.mode=local" "gateway.auth.mode=token" "gateway.auth.token=${new_token}" "gateway.controlUi.allowInsecureAuth=true" "gateway.controlUi.dangerouslyDisableDeviceAuth=true" "gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true" "gateway.tailscale.mode=off"; do
+			local k="${kv%%=*}" v="${kv#*=}"
+			_JS_KEY="$k" _JS_VAL="$v" "$NODE_BIN" -e "const fs=require('fs');let d={};try{d=JSON.parse(fs.readFileSync('${config_file}','utf8'));}catch(e){}const ks=process.env._JS_KEY.split('.');let o=d;for(let i=0;i<ks.length-1;i++){if(!o[ks[i]]||typeof o[ks[i]]!=='object')o[ks[i]]={};o=o[ks[i]];}let v=process.env._JS_VAL;try{v=JSON.parse(v);}catch(e){}o[ks[ks.length-1]]=v;fs.writeFileSync('${config_file}',JSON.stringify(d,null,2));" 2>/dev/null
+		done
+		chown openclaw:openclaw "$config_file" 2>/dev/null || true
+
+		# 同步 token 到 UCI
+		. /lib/functions.sh 2>/dev/null || true
+		uci set openclaw.main.token="$new_token" 2>/dev/null || true
+		uci commit openclaw 2>/dev/null || true
+		log_info "新认证令牌: $new_token"
+	fi
+
+	# 7. 重启服务
+	/etc/init.d/openclaw start >/dev/null 2>&1 &
+	log_info "出厂设置已恢复，Gateway 重启中..."
+}
+
 # ── 主入口 ──
 case "${1:-}" in
 	setup)
@@ -501,13 +567,17 @@ case "${1:-}" in
 	node)
 		download_node "$NODE_VERSION"
 		;;
+	factory-reset)
+		do_factory_reset
+		;;
 	*)
-		echo "用法: openclaw-env {setup|check|upgrade|node}"
+		echo "用法: openclaw-env {setup|check|upgrade|node|factory-reset}"
 		echo ""
-		echo "  setup    — 完整安装 (下载 Node.js + pnpm + OpenClaw)"
-		echo "  check    — 检查环境状态"
-		echo "  upgrade  — 升级 OpenClaw 到最新版"
-		echo "  node     — 仅下载/更新 Node.js"
+		echo "  setup          — 完整安装 (下载 Node.js + pnpm + OpenClaw)"
+		echo "  check          — 检查环境状态"
+		echo "  upgrade        — 升级 OpenClaw 到最新版"
+		echo "  node           — 仅下载/更新 Node.js"
+		echo "  factory-reset  — 恢复出厂设置 (清除所有配置)"
 		exit 1
 		;;
 esac

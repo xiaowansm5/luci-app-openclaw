@@ -4,6 +4,24 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [1.0.3] - 2026-03-02
+
+### 修复
+- **P0** 配置管理写入错误的 JSON 路径导致 Gateway 崩溃且无法恢复 (#1)
+  - `json_set models.openai.apiKey` 在 `openclaw.json` 创建了非法的顶层 `models` 键
+  - OpenClaw 2026.3.1 严格校验配置 schema，拒绝启动并报 `Unknown config keys: models.openai`
+  - 修复: API Key 改写入 `auth-profiles.json`，模型注册到 `agents.defaults.models`
+  - 影响: 所有 11 个供应商的快速配置 (OpenAI/Anthropic/Gemini/OpenRouter/DeepSeek/GitHub Copilot/Qwen/xAI/Groq/SiliconFlow/自定义)
+- **P0** 恢复默认配置 → "清除模型配置" 未清理 `auth-profiles.json` 认证信息
+- **P1** 健康检查新增自动修复: 检测并移除旧版错误写入的顶层 `models` 无效键
+- **P1** `set_active_model` 手动切换模型时未注册到 `agents.defaults.models`
+
+### 新增
+- `openclaw-env factory-reset` 非交互式恢复出厂设置命令
+- `auth_set_apikey` 函数: 正确写入 API Key 到 `auth-profiles.json`
+- `register_and_set_model` 函数: 注册模型到 `agents.defaults.models` 并设为默认
+- `register_custom_provider` 函数: 为需要 `baseUrl` 的 OpenAI 兼容供应商注册 `models.providers`
+
 ## [1.0.2] - 2026-03-02
 
 ### 修复

@@ -124,6 +124,86 @@ enable_auth_plugins() {
 	" 2>/dev/null
 }
 
+# ── 模型认证: 将 API Key 写入 auth-profiles.json (而非 openclaw.json) ──
+# 用法: auth_set_apikey <provider> <api_key> [profile_id]
+# 例: auth_set_apikey openai sk-xxx
+#     auth_set_apikey anthropic sk-ant-xxx
+#     auth_set_apikey openai-compatible sk-xxx custom:manual
+auth_set_apikey() {
+	local provider="$1" api_key="$2" profile_id="${3:-${1}:manual}"
+	local auth_dir="${OC_STATE_DIR}/agents/main/agent"
+	local auth_file="${auth_dir}/auth-profiles.json"
+	mkdir -p "$auth_dir"
+	_AP_PROVIDER="$provider" _AP_KEY="$api_key" _AP_PROFILE="$profile_id" "$NODE_BIN" -e "
+		const fs=require('fs'),f=process.env._AP_FILE||'${auth_file}';
+		let d={version:1,profiles:{},usageStats:{}};
+		try{d=JSON.parse(fs.readFileSync(f,'utf8'));}catch(e){}
+		if(!d.profiles)d.profiles={};
+		d.profiles[process.env._AP_PROFILE]={
+			type:'api_key',
+			provider:process.env._AP_PROVIDER,
+			token:process.env._AP_KEY
+		};
+		fs.writeFileSync(f,JSON.stringify(d,null,2));
+	" 2>/dev/null
+	chown openclaw:openclaw "$auth_file" 2>/dev/null || true
+}
+
+# ── 注册模型到 agents.defaults.models 并设为默认 ──
+# 用法: register_and_set_model <model_id>
+# 例: register_and_set_model openai/gpt-5.2
+#     register_and_set_model anthropic/claude-sonnet-4
+# 注意: 模型 ID 可能含 "." (如 gpt-5.2)，不能用 json_set (以 . 分割路径)
+register_and_set_model() {
+	local model_id="$1"
+	_RSM_MID="$model_id" "$NODE_BIN" -e "
+		const fs=require('fs');
+		let d={};
+		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+		if(!d.agents)d.agents={};
+		if(!d.agents.defaults)d.agents.defaults={};
+		if(!d.agents.defaults.models)d.agents.defaults.models={};
+		if(!d.agents.defaults.model)d.agents.defaults.model={};
+		const mid=process.env._RSM_MID;
+		d.agents.defaults.models[mid]={};
+		d.agents.defaults.model.primary=mid;
+		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+	" 2>/dev/null
+	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+}
+
+# ── 注册自定义提供商 (需要 baseUrl 的 OpenAI 兼容提供商) ──
+# 用法: register_custom_provider <provider_name> <base_url> <api_key> <model_id> [model_display_name]
+# 例: register_custom_provider dashscope https://dashscope.aliyuncs.com/compatible-mode/v1 sk-xxx qwen-max "Qwen Max"
+register_custom_provider() {
+	local provider_name="$1" base_url="$2" api_key="$3" model_id="$4" model_display="${5:-$4}"
+	_RCP_PROV="$provider_name" _RCP_URL="$base_url" _RCP_KEY="$api_key" _RCP_MID="$model_id" _RCP_MNAME="$model_display" "$NODE_BIN" -e "
+		const fs=require('fs');
+		let d={};
+		try{d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));}catch(e){}
+		if(!d.models)d.models={};
+		if(!d.models.providers)d.models.providers={};
+		d.models.mode='merge';
+		const prov=process.env._RCP_PROV;
+		d.models.providers[prov]={
+			baseUrl:process.env._RCP_URL,
+			apiKey:process.env._RCP_KEY,
+			api:'openai-responses',
+			models:[{
+				id:process.env._RCP_MID,
+				name:process.env._RCP_MNAME,
+				reasoning:false,
+				input:['text','image'],
+				cost:{input:0,output:0,cacheRead:0,cacheWrite:0},
+				contextWindow:128000,
+				maxTokens:32000
+			}]
+		};
+		fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+	" 2>/dev/null
+	chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+}
+
 # ── 辅助函数 ──
 
 # 清理输入: 去除 ANSI 转义序列、不可见字符，只保留 ASCII 可打印字符
@@ -312,7 +392,7 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 OpenAI API Key (sk-...)" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.openai.apiKey "$api_key"
+				auth_set_apikey openai "$api_key"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
 				echo -e "    ${CYAN}a)${NC} gpt-5.2       — 最强编程与代理旗舰 (推荐)"
@@ -334,8 +414,8 @@ configure_model() {
 					g) prompt_with_default "请输入模型名称" "gpt-5.2" model_name ;;
 					*) model_name="gpt-5.2" ;;
 				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ OpenAI 已配置，活跃模型: ${model_name}${NC}"
+				register_and_set_model "openai/${model_name}"
+				echo -e "  ${GREEN}✅ OpenAI 已配置，活跃模型: openai/${model_name}${NC}"
 			fi
 			;;
 		3)
@@ -345,7 +425,7 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 Anthropic API Key (sk-ant-...)" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.anthropic.apiKey "$api_key"
+				auth_set_apikey anthropic "$api_key"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
 				echo -e "    ${CYAN}a)${NC} claude-sonnet-4-20250514   — Claude Sonnet 4 (推荐)"
@@ -361,8 +441,8 @@ configure_model() {
 					d) prompt_with_default "请输入模型名称" "claude-sonnet-4-20250514" model_name ;;
 					*) model_name="claude-sonnet-4-20250514" ;;
 				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ Anthropic 已配置，活跃模型: ${model_name}${NC}"
+				register_and_set_model "anthropic/${model_name}"
+				echo -e "  ${GREEN}✅ Anthropic 已配置，活跃模型: anthropic/${model_name}${NC}"
 			fi
 			;;
 		4)
@@ -372,7 +452,7 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 Google AI API Key" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.google.apiKey "$api_key"
+				auth_set_apikey google "$api_key"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
 				echo -e "    ${CYAN}a)${NC} gemini-2.5-pro       — 旗舰推理 (推荐)"
@@ -390,8 +470,8 @@ configure_model() {
 					e) prompt_with_default "请输入模型名称" "gemini-2.5-pro" model_name ;;
 					*) model_name="gemini-2.5-pro" ;;
 				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ Google Gemini 已配置，活跃模型: ${model_name}${NC}"
+				register_and_set_model "google/${model_name}"
+				echo -e "  ${GREEN}✅ Google Gemini 已配置，活跃模型: google/${model_name}${NC}"
 			fi
 			;;
 		5)
@@ -402,7 +482,7 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 OpenRouter API Key" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.openrouter.apiKey "$api_key"
+				auth_set_apikey openrouter "$api_key"
 				echo ""
 				echo -e "  ${CYAN}常用模型 (格式: provider/model):${NC}"
 				echo -e "    ${CYAN}a)${NC} anthropic/claude-sonnet-4    — Claude Sonnet 4 (推荐)"
@@ -424,8 +504,8 @@ configure_model() {
 					g) prompt_with_default "请输入模型名称" "anthropic/claude-sonnet-4" model_name ;;
 					*) model_name="anthropic/claude-sonnet-4" ;;
 				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ OpenRouter 已配置，活跃模型: ${model_name}${NC}"
+				register_and_set_model "openrouter/${model_name}"
+				echo -e "  ${GREEN}✅ OpenRouter 已配置，活跃模型: openrouter/${model_name}${NC}"
 			fi
 			;;
 		6)
@@ -435,7 +515,7 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 DeepSeek API Key" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.deepseek.apiKey "$api_key"
+				auth_set_apikey deepseek "$api_key"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
 				echo -e "    ${CYAN}a)${NC} deepseek-chat     — DeepSeek-V3 (通用对话)"
@@ -449,8 +529,8 @@ configure_model() {
 					c) prompt_with_default "请输入模型名称" "deepseek-chat" model_name ;;
 					*) model_name="deepseek-chat" ;;
 				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ DeepSeek 已配置，活跃模型: ${model_name}${NC}"
+				register_and_set_model "deepseek/${model_name}"
+				echo -e "  ${GREEN}✅ DeepSeek 已配置，活跃模型: deepseek/${model_name}${NC}"
 			fi
 			;;
 		7)
@@ -480,7 +560,7 @@ configure_model() {
 					echo ""
 					prompt_with_default "请输入 GitHub Token (ghp_...)" "" api_key
 					if [ -n "$api_key" ]; then
-						json_set models.github-copilot.apiKey "$api_key"
+						auth_set_apikey github-copilot "$api_key" "github-copilot:github"
 						echo ""
 						echo -e "  ${CYAN}可用模型:${NC}"
 						echo -e "    ${CYAN}a)${NC} github-copilot/claude-sonnet-4 — Claude Sonnet 4 (推荐)"
@@ -498,7 +578,7 @@ configure_model() {
 							e) prompt_with_default "请输入模型名称" "github-copilot/claude-sonnet-4" model_name ;;
 							*) model_name="github-copilot/claude-sonnet-4" ;;
 						esac
-						json_set agents.defaults.model.primary "$model_name"
+						register_and_set_model "$model_name"
 						echo -e "  ${GREEN}✅ GitHub Copilot 已配置，活跃模型: ${model_name}${NC}"
 					fi
 					;;
@@ -530,8 +610,6 @@ configure_model() {
 					echo ""
 					prompt_with_default "请输入阿里云 API Key (sk-...)" "" api_key
 					if [ -n "$api_key" ]; then
-						json_set models.dashscope.apiKey "$api_key"
-						json_set models.dashscope.baseUrl "https://dashscope.aliyuncs.com/compatible-mode/v1"
 						echo ""
 						echo -e "  ${CYAN}可用模型:${NC}"
 						echo -e "    ${CYAN}a)${NC} qwen-max        — 通义千问旗舰 (推荐)"
@@ -549,8 +627,10 @@ configure_model() {
 							e) prompt_with_default "请输入模型名称" "qwen-max" model_name ;;
 							*) model_name="qwen-max" ;;
 						esac
-						json_set agents.defaults.model.primary "$model_name"
-						echo -e "  ${GREEN}✅ 通义千问已配置，活跃模型: ${model_name}${NC}"
+						auth_set_apikey dashscope "$api_key"
+						register_custom_provider dashscope "https://dashscope.aliyuncs.com/compatible-mode/v1" "$api_key" "$model_name" "$model_name"
+						register_and_set_model "dashscope/${model_name}"
+						echo -e "  ${GREEN}✅ 通义千问已配置，活跃模型: dashscope/${model_name}${NC}"
 					fi
 					;;
 			esac
@@ -562,7 +642,7 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 xAI API Key" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.xai.apiKey "$api_key"
+				auth_set_apikey xai "$api_key"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
 				echo -e "    ${CYAN}a)${NC} grok-3       — Grok 3 旗舰"
@@ -576,8 +656,8 @@ configure_model() {
 					c) prompt_with_default "请输入模型名称" "grok-3" model_name ;;
 					*) model_name="grok-3" ;;
 				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ xAI Grok 已配置，活跃模型: ${model_name}${NC}"
+				register_and_set_model "xai/${model_name}"
+				echo -e "  ${GREEN}✅ xAI Grok 已配置，活跃模型: xai/${model_name}${NC}"
 			fi
 			;;
 		10)
@@ -588,7 +668,7 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 Groq API Key" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.groq.apiKey "$api_key"
+				auth_set_apikey groq "$api_key"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
 				echo -e "    ${CYAN}a)${NC} llama-4-maverick-17b-128e  — Llama 4 Maverick (推荐)"
@@ -604,8 +684,8 @@ configure_model() {
 					d) prompt_with_default "请输入模型名称" "llama-4-maverick-17b-128e" model_name ;;
 					*) model_name="llama-4-maverick-17b-128e" ;;
 				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ Groq 已配置，活跃模型: ${model_name}${NC}"
+				register_and_set_model "groq/${model_name}"
+				echo -e "  ${GREEN}✅ Groq 已配置，活跃模型: groq/${model_name}${NC}"
 			fi
 			;;
 		11)
@@ -616,8 +696,6 @@ configure_model() {
 			echo ""
 			prompt_with_default "请输入 SiliconFlow API Key" "" api_key
 			if [ -n "$api_key" ]; then
-				json_set models.siliconflow.apiKey "$api_key"
-				json_set models.siliconflow.baseUrl "https://api.siliconflow.cn/v1"
 				echo ""
 				echo -e "  ${CYAN}可用模型:${NC}"
 				echo -e "    ${CYAN}a)${NC} deepseek-ai/DeepSeek-V3      — DeepSeek V3 (推荐)"
@@ -633,8 +711,10 @@ configure_model() {
 					d) prompt_with_default "请输入模型名称" "deepseek-ai/DeepSeek-V3" model_name ;;
 					*) model_name="deepseek-ai/DeepSeek-V3" ;;
 				esac
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ SiliconFlow 已配置，活跃模型: ${model_name}${NC}"
+				auth_set_apikey siliconflow "$api_key"
+				register_custom_provider siliconflow "https://api.siliconflow.cn/v1" "$api_key" "$model_name" "$model_name"
+				register_and_set_model "siliconflow/${model_name}"
+				echo -e "  ${GREEN}✅ SiliconFlow 已配置，活跃模型: siliconflow/${model_name}${NC}"
 			fi
 			;;
 		12)
@@ -646,10 +726,10 @@ configure_model() {
 			prompt_with_default "API Key" "" api_key
 			prompt_with_default "模型名称" "" model_name
 			if [ -n "$base_url" ] && [ -n "$api_key" ] && [ -n "$model_name" ]; then
-				json_set models.custom.apiKey "$api_key"
-				json_set models.custom.baseUrl "$base_url"
-				json_set agents.defaults.model.primary "$model_name"
-				echo -e "  ${GREEN}✅ 自定义模型已配置${NC}"
+				auth_set_apikey openai-compatible "$api_key" "openai-compatible:manual"
+				register_custom_provider openai-compatible "$base_url" "$api_key" "$model_name" "$model_name"
+				register_and_set_model "openai-compatible/${model_name}"
+				echo -e "  ${GREEN}✅ 自定义模型已配置，活跃模型: openai-compatible/${model_name}${NC}"
 			fi
 			;;
 		0) return ;;
@@ -704,7 +784,7 @@ set_active_model() {
 		elif [ "$model_sel" = "m" ]; then
 			prompt_with_default "请输入模型 ID (如 openai/gpt-4o)" "${current_model:-}" manual_model
 			if [ -n "$manual_model" ]; then
-				json_set agents.defaults.model.primary "$manual_model"
+				register_and_set_model "$manual_model"
 				echo -e "  ${GREEN}✅ 活跃模型已设为: ${manual_model}${NC}"
 				ask_restart
 			fi
@@ -715,7 +795,7 @@ set_active_model() {
 				console.log(m?m.key:'');
 			" "$models_json" "$model_sel" 2>/dev/null)
 			if [ -n "$selected" ]; then
-				json_set agents.defaults.model.primary "$selected"
+				register_and_set_model "$selected"
 				echo -e "  ${GREEN}✅ 活跃模型已切换为: ${selected}${NC}"
 				ask_restart
 			else
@@ -728,7 +808,7 @@ set_active_model() {
 		echo ""
 		prompt_with_default "直接输入模型 ID 设置? (留空返回)" "" manual_model
 		if [ -n "$manual_model" ]; then
-			json_set agents.defaults.model.primary "$manual_model"
+			register_and_set_model "$manual_model"
 			echo -e "  ${GREEN}✅ 活跃模型已设为: ${manual_model}${NC}"
 			ask_restart
 		fi
@@ -1028,6 +1108,37 @@ health_check() {
 	local gw_port=$(json_get gateway.port)
 	gw_port=${gw_port:-18789}
 
+	# ── 自动修复: 移除旧版错误写入的顶层 models.xxx 无效键 ──
+	if [ -f "$CONFIG_FILE" ]; then
+		local has_bad_models=$("$NODE_BIN" -e "
+			const d=JSON.parse(require('fs').readFileSync('${CONFIG_FILE}','utf8'));
+			const m=d.models;
+			if(m&&typeof m==='object'){
+				const bad=Object.keys(m).filter(k=>['openai','anthropic','google','openrouter','deepseek','github-copilot','dashscope','xai','groq','siliconflow','custom'].includes(k));
+				if(bad.length>0){console.log(bad.join(','));}
+			}
+		" 2>/dev/null)
+		if [ -n "$has_bad_models" ]; then
+			echo -e "  ${YELLOW}⚠️  检测到旧版配置错误: 顶层 models 包含无效键 (${has_bad_models})${NC}"
+			echo -e "  ${CYAN}正在自动修复...${NC}"
+			"$NODE_BIN" -e "
+				const fs=require('fs');
+				const d=JSON.parse(fs.readFileSync('${CONFIG_FILE}','utf8'));
+				const bad=['openai','anthropic','google','openrouter','deepseek','github-copilot','dashscope','xai','groq','siliconflow','custom'];
+				if(d.models&&typeof d.models==='object'){
+					bad.forEach(k=>delete d.models[k]);
+					if(Object.keys(d.models).length===0||(Object.keys(d.models).length===1&&d.models.providers)){}
+					else if(Object.keys(d.models).filter(k=>k!=='mode'&&k!=='providers').length===0){}
+					if(!d.models.providers&&Object.keys(d.models).every(k=>bad.includes(k)||k==='mode'))delete d.models;
+				}
+				fs.writeFileSync('${CONFIG_FILE}',JSON.stringify(d,null,2));
+			" 2>/dev/null
+			chown openclaw:openclaw "$CONFIG_FILE" 2>/dev/null || true
+			echo -e "  ${GREEN}✅ 已移除无效的 models 配置键${NC}"
+			echo ""
+		fi
+	fi
+
 	if check_port_listening "$gw_port"; then
 		echo -e "  ${GREEN}✅ Gateway 端口 ${gw_port} 正在监听${NC}"
 	else
@@ -1105,6 +1216,12 @@ reset_to_defaults() {
 				oc_cmd config unset models >/dev/null 2>&1 || true
 				oc_cmd config unset agents.defaults.model >/dev/null 2>&1 || true
 				oc_cmd config unset agents.defaults.models >/dev/null 2>&1 || true
+				# 同时清除 auth-profiles.json 中的认证信息
+				local auth_file="${OC_STATE_DIR}/agents/main/agent/auth-profiles.json"
+				if [ -f "$auth_file" ]; then
+					echo '{"version":1,"profiles":{},"usageStats":{}}' > "$auth_file"
+					chown openclaw:openclaw "$auth_file" 2>/dev/null || true
+				fi
 				echo -e "  ${GREEN}✅ 模型配置已清除${NC}"
 				echo -e "  ${YELLOW}请通过菜单 [2] 重新配置 AI 模型${NC}"
 				ask_restart
